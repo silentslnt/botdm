@@ -81,7 +81,7 @@ class EmbedBuilder:
         if self.author_name:
             embed.set_author(
                 name=self.author_name,
-                icon_url=self.author_icon if self.author_icon else discord.Embed.Empty
+                icon_url=self.author_icon if self.author_icon else None
             )
         
         for field in self.fields:

@@ -4,7 +4,7 @@ from discord.ui import Button, View, Modal, TextInput, Select
 import os
 from dotenv import load_dotenv
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 load_dotenv()
@@ -68,23 +68,22 @@ class EmbedBuilderView(View):
         
         return embed
     
-    async def update_preview(self, interaction):
-        """Update the preview message"""
+    async def _build_status_embeds(self):
+        """Build the status + preview embed pair shown by the builder."""
         embed = self.build_preview_embed()
-        
-        # Status embed
+
         status = discord.Embed(
             title="📝 DM Campaign Builder",
             color=discord.Color.blue(),
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
-        
+
         target_text = {
             'everyone': '👤 Everyone',
             'role': '🏷️ Specific Role',
             'members': '👥 Selected Members'
         }
-        
+
         status.add_field(
             name="🎯 Target",
             value=target_text.get(self.campaign.get('targets'), 'Everyone'),
@@ -100,7 +99,7 @@ class EmbedBuilderView(View):
             value=str(await self.estimate_recipients()),
             inline=True
         )
-        
+
         status.add_field(
             name="🎨 Color",
             value=f"#{self.campaign.get('color', 0x5865F2):06X}",
@@ -116,10 +115,22 @@ class EmbedBuilderView(View):
             value=f"{len(self.campaign.get('fields', []))} added",
             inline=True
         )
-        
+
         status.set_footer(text="Use buttons below to customize • Click Preview to see result")
-        
-        await interaction.response.edit_message(embeds=[status, embed], view=self)
+
+        return [status, embed]
+
+    async def update_preview(self, interaction):
+        """Update the builder message in response to a fresh interaction."""
+        embeds = await self._build_status_embeds()
+        await interaction.response.edit_message(embeds=embeds, view=self)
+
+    async def refresh_message(self):
+        """Update the builder message directly (when the interaction was already consumed)."""
+        embeds = await self._build_status_embeds()
+        message = getattr(self, 'message', None)
+        if message is not None:
+            await message.edit(embeds=embeds, view=self)
     
     async def estimate_recipients(self):
         """Estimate number of recipients"""
@@ -310,9 +321,6 @@ class EmbedBuilderView(View):
     async def set_target_everyone(self, interaction: discord.Interaction, button: Button):
         self.campaign['targets'] = 'everyone'
         pending_campaigns[self.campaign_id] = self.campaign
-        for item in self.children:
-            if hasattr(item, 'label') and 'Target:' in str(item.label):
-                item.label = f"🎯 Target: Everyone"
         await self.update_preview(interaction)
     
     @discord.ui.button(label="🏷️ Select Role", style=discord.ButtonStyle.secondary, row=2)
@@ -346,13 +354,13 @@ class EmbedBuilderView(View):
                 self.campaign['targets'] = 'role'
                 self.campaign['target_role_id'] = role_id
                 pending_campaigns[self.campaign_id] = self.campaign
-                
+
                 role = self.ctx.guild.get_role(role_id)
                 await select_interaction.response.send_message(
                     f"✅ Target set to role: **{role.name}**",
                     ephemeral=True
                 )
-                await self.update_preview(select_interaction)
+                await self.refresh_message()
         
         view = View()
         view.add_item(RoleSelect())
@@ -388,15 +396,15 @@ class EmbedBuilderView(View):
     @discord.ui.button(label="👁️ Preview", style=discord.ButtonStyle.primary, row=3)
     async def preview(self, interaction: discord.Interaction, button: Button):
         embed = self.build_preview_embed()
-        content = self.campaign.get('content')
-        
+        content = self.campaign.get('content') or ""
+
         preview_embed = discord.Embed(
             title="📤 Message Preview",
             description="This is exactly what recipients will see:",
             color=discord.Color.gold()
         )
-        
-        await interaction.response.edit_message(embeds=[preview_embed, embed], view=self)
+
+        await interaction.response.edit_message(content=content, embeds=[preview_embed, embed], view=self)
     
     @discord.ui.button(label="✅ Start DM Campaign", style=discord.ButtonStyle.success, row=3)
     async def start_campaign(self, interaction: discord.Interaction, button: Button):
@@ -412,10 +420,11 @@ class EmbedBuilderView(View):
     
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger, row=3)
     async def cancel(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer()
         for item in self.children:
             item.disabled = True
         await interaction.edit_original_response(view=self)
-        
+
         embed = discord.Embed(
             title="❌ Cancelled",
             description="DM campaign has been cancelled.",
@@ -491,7 +500,7 @@ async def execute_dm_campaign(ctx, campaign):
     status_embed = discord.Embed(
         title="📤 DM Campaign in Progress",
         color=discord.Color.orange(),
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     status_embed.add_field(name="Total Recipients", value=str(total), inline=True)
     status_embed.add_field(name="Sent", value="0", inline=True)
@@ -543,17 +552,18 @@ async def on_ready():
     print(f'📊 Servers: {len(bot.guilds)}')
 
 @bot.command()
+@commands.guild_only()
 @commands.has_permissions(administrator=True)
 async def dm(ctx):
     """Start the DM campaign builder"""
     
-    campaign_id = f"{ctx.guild.id}_{ctx.author.id}_{datetime.utcnow().timestamp()}"
+    campaign_id = f"{ctx.guild.id}_{ctx.author.id}_{datetime.now(timezone.utc).timestamp()}"
     
     embed = discord.Embed(
         title="📝 DM Campaign Builder",
         description="Create and send DM messages to server members",
         color=discord.Color.blue(),
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     
     embed.add_field(
@@ -588,6 +598,7 @@ async def dm(ctx):
     view.message = await ctx.send(embeds=[embed, preview_embed], view=view)
 
 @bot.command()
+@commands.guild_only()
 @commands.has_permissions(administrator=True)
 async def dm_quick(ctx, *, message):
     """Quick DM everyone with a simple message"""
@@ -613,9 +624,9 @@ async def dm_quick(ctx, *, message):
         try:
             await member.send(message)
             sent += 1
-        except:
+        except (discord.Forbidden, discord.HTTPException):
             failed += 1
-        
+
         await asyncio.sleep(1.5)
     
     embed.title = "✅ Complete"
@@ -632,7 +643,7 @@ async def dmhelp(ctx):
         title="🤖 DM All Bot - Help",
         description="Mass DM system for Discord servers",
         color=discord.Color.blue(),
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     
     embed.add_field(
